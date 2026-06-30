@@ -3,6 +3,8 @@
 // Talks to the FastAPI backend over plain fetch() calls.
 // ============================================================
 
+// Change this to your deployed backend URL once you go live, e.g.
+// const API_BASE = "https://your-app-name.onrender.com";
 const API_BASE = "http://127.0.0.1:8080";
 
 // ---------- State ----------
@@ -211,23 +213,97 @@ els.detailBuyBtn.addEventListener("click", async () => {
     showToast("Log in first to make a purchase.");
     return;
   }
+  await startRazorpayCheckout(activeArtwork);
+});
+
+// ============================================================
+// Razorpay checkout flow
+//
+// 1. Ask our backend to create a Razorpay order for this artwork.
+// 2. Open Razorpay's hosted checkout popup with that order_id.
+// 3. On success, Razorpay hands us a payment_id + signature.
+// 4. Send those to our backend to verify — the backend re-checks the
+//    signature itself using the secret key, so we never just trust
+//    whatever the popup tells the browser.
+// ============================================================
+
+async function startRazorpayCheckout(artwork) {
+  els.detailBuyBtn.disabled = true;
+  els.detailBuyBtn.textContent = "Starting checkout…";
+
   try {
-    const res = await fetch(`${API_BASE}/artworks/${activeArtwork.id}/buy`, {
+    // Step 1: create the order on our backend
+    const checkoutRes = await fetch(`${API_BASE}/artworks/${artwork.id}/checkout`, {
       method: "POST",
       headers: authHeaders(),
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || "Purchase failed");
-    els.detailMsg.classList.remove("hidden");
-    els.detailMsg.style.color = "var(--success)";
-    els.detailMsg.textContent = data.message;
-    showToast(data.message);
+    const order = await checkoutRes.json();
+    if (!checkoutRes.ok) throw new Error(order.detail || "Could not start checkout");
+
+    // Step 2: open Razorpay's popup
+    const options = {
+      key: order.key_id,
+      amount: order.amount,
+      currency: order.currency,
+      name: "Artery",
+      description: order.artwork_title,
+      order_id: order.order_id,
+      prefill: {
+        name: order.buyer_name,
+        email: order.buyer_email,
+      },
+      theme: { color: "#e8753c" },
+      handler: async function (response) {
+        // Step 3 + 4: Razorpay calls this only after a successful payment.
+        // `response` contains razorpay_payment_id, razorpay_order_id, razorpay_signature.
+        await verifyPaymentOnServer(response, artwork);
+      },
+      modal: {
+        ondismiss: function () {
+          // User closed the popup without paying — just reset the button.
+          els.detailBuyBtn.disabled = false;
+          els.detailBuyBtn.textContent = "Buy now";
+        },
+      },
+    };
+
+    const rzp = new Razorpay(options);
+    rzp.open();
   } catch (err) {
     els.detailMsg.classList.remove("hidden");
     els.detailMsg.style.color = "var(--error)";
     els.detailMsg.textContent = err.message;
+  } finally {
+    els.detailBuyBtn.disabled = false;
+    els.detailBuyBtn.textContent = "Buy now";
   }
-});
+}
+
+async function verifyPaymentOnServer(razorpayResponse, artwork) {
+  try {
+    const res = await fetch(`${API_BASE}/payments/verify`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify({
+        razorpay_order_id: razorpayResponse.razorpay_order_id,
+        razorpay_payment_id: razorpayResponse.razorpay_payment_id,
+        razorpay_signature: razorpayResponse.razorpay_signature,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Payment verification failed");
+
+    els.detailMsg.classList.remove("hidden");
+    els.detailMsg.style.color = "var(--success)";
+    els.detailMsg.textContent = `Payment successful! You now own "${artwork.title}".`;
+    showToast("Payment successful!");
+  } catch (err) {
+    els.detailMsg.classList.remove("hidden");
+    els.detailMsg.style.color = "var(--error)";
+    els.detailMsg.textContent = err.message;
+    showToast("Payment could not be verified.", true);
+  }
+}
 
 // ============================================================
 // Auth — signup / login / logout

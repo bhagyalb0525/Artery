@@ -29,6 +29,10 @@ CREATE TABLE IF NOT EXISTS purchases (
     id INT AUTO_INCREMENT PRIMARY KEY,
     buyer_id INT NOT NULL,
     artwork_id INT NOT NULL,
+    amount DECIMAL(10, 2) NOT NULL,
+    razorpay_order_id VARCHAR(100) UNIQUE NOT NULL,
+    razorpay_payment_id VARCHAR(100),
+    status VARCHAR(20) NOT NULL DEFAULT 'pending',  -- pending | paid | failed
     purchased_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (buyer_id) REFERENCES users(id) ON DELETE CASCADE,
     FOREIGN KEY (artwork_id) REFERENCES artworks(id) ON DELETE CASCADE
