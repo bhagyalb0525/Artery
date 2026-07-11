@@ -5,7 +5,7 @@
 
 // Change this to your deployed backend URL once you go live, e.g.
 // const API_BASE = "https://your-app-name.onrender.com";
-const API_BASE = "http://127.0.0.1:8080";
+const API_BASE = "https://artery-oefo.onrender.com";
 
 // ---------- State ----------
 let token = localStorage.getItem("art_token") || null;
