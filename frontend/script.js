@@ -151,19 +151,22 @@ function renderArtGrid(artworks, gridEl, emptyEl, isOwner) {
   emptyEl.classList.toggle("hidden", artworks.length > 0);
 
   artworks.forEach((art) => {
+    const soldOut = art.stock <= 0;
     const card = document.createElement("div");
-    card.className = "art-card";
+    card.className = `art-card${soldOut ? " sold-out" : ""}`;
     card.innerHTML = `
       <div class="thumb-wrap">
         <img src="${API_BASE}${art.image_path}" alt="${escapeHtml(art.title)}" loading="lazy" />
+        ${soldOut ? `<div class="sold-badge">Sold Out</div>` : ""}
       </div>
       <div class="art-card-body">
         <h3 class="art-card-title">${escapeHtml(art.title)}</h3>
         <p class="art-card-artist">${art.artist_name ? "by " + escapeHtml(art.artist_name) : ""}</p>
         <div class="art-card-footer">
-          <span class="art-card-price">${formatPrice(art.price)}</span>
+          <span class="art-card-price">${soldOut ? '<span style="color:var(--text-muted)">Sold Out</span>' : formatPrice(art.price)}</span>
           <span class="art-card-category">${escapeHtml(art.category)}</span>
         </div>
+        ${art.stock > 1 ? `<p class="art-card-stock">${art.stock} left</p>` : ""}
         ${isOwner ? `<button class="art-card-delete" data-id="${art.id}">Delete</button>` : ""}
       </div>
     `;
@@ -194,6 +197,7 @@ function escapeHtml(str) {
 
 function openDetail(art) {
   activeArtwork = art;
+  const soldOut = art.stock <= 0;
   els.detailImage.src = `${API_BASE}${art.image_path}`;
   els.detailImage.alt = art.title;
   els.detailTitle.textContent = art.title;
@@ -202,6 +206,23 @@ function openDetail(art) {
   els.detailPrice.textContent = formatPrice(art.price);
   els.detailCategory.textContent = art.category;
   els.detailMsg.classList.add("hidden");
+
+  // Stock indicator
+  const existingStock = document.getElementById("detailStock");
+  if (existingStock) existingStock.remove();
+  if (art.stock > 0) {
+    const stockEl = document.createElement("p");
+    stockEl.id = "detailStock";
+    stockEl.style.cssText = "font-size:0.82rem;color:var(--text-muted);margin:0.3rem 0 0;";
+    stockEl.textContent = art.stock === 1 ? "Only 1 left" : `${art.stock} copies available`;
+    els.detailArtist.after(stockEl);
+  }
+
+  // Disable buy button if sold out
+  els.detailBuyBtn.disabled = soldOut;
+  els.detailBuyBtn.textContent = soldOut ? "Sold Out" : "Buy now";
+  els.detailBuyBtn.style.opacity = soldOut ? "0.5" : "1";
+
   openModal(els.detailModal);
 }
 
@@ -403,6 +424,7 @@ els.uploadForm.addEventListener("submit", async (e) => {
   formData.append("description", $("artDescription").value.trim());
   formData.append("price", $("artPrice").value);
   formData.append("category", $("artCategory").value);
+  formData.append("stock", $("artStock").value || "1");
   formData.append("image", $("artImage").files[0]);
 
   try {

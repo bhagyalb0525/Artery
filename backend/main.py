@@ -1,7 +1,7 @@
 """
 Digital Art Marketplace — Backend
 A single-file FastAPI app: auth, artwork upload, browsing, and purchase.
-Database: MySQL (via mysql-connector-python)
+Database: PostgreSQL (via psycopg2)
 
 Run:
     pip install -r requirements.txt
@@ -16,9 +16,10 @@ import hashlib
 from datetime import datetime, timedelta
 from typing import Optional, List
 
-import mysql.connector
+import psycopg2
+import psycopg2.pool
+from psycopg2.extras import RealDictCursor
 import razorpay
-from mysql.connector import pooling
 from dotenv import load_dotenv
 from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -32,14 +33,25 @@ from jose import jwt, JWTError
 # Config — loaded from a .env file (see .env.example for the template)
 # ----------------------------------------------------------------------------
 
-load_dotenv()  # reads variables from a .env file in the same folder into os.environ
+load_dotenv(override=True)  # reads variables from a .env file in the same folder into os.environ
 
-DB_CONFIG = {
-    "host": os.getenv("DB_HOST", "localhost"),
-    "user": os.getenv("DB_USER", "root"),
-    "password": os.getenv("DB_PASSWORD", ""),
-    "database": os.getenv("DB_NAME", "art_marketplace"),
-}
+# Most free Postgres hosts (Neon, Supabase, Render, Railway) hand you a single
+# connection string instead of separate host/user/password fields. We support
+# both: if DATABASE_URL is set, use it directly; otherwise build one from the
+# individual DB_* vars (handy for local dev against a local Postgres install).
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    DB_HOST = os.getenv("DB_HOST", "localhost")
+    DB_PORT = os.getenv("DB_PORT", "5432")
+    DB_USER = os.getenv("DB_USER", "postgres")
+    DB_PASSWORD = os.getenv("DB_PASSWORD", "")
+    DB_NAME = os.getenv("DB_NAME", "art_marketplace")
+    DATABASE_URL = f"postgresql://{DB_USER}:{DB_PASSWORD}@{DB_HOST}:{DB_PORT}/{DB_NAME}"
+
+# Neon/Supabase/Render Postgres all require SSL for external connections.
+# sslmode=require is harmless for local dev too (local Postgres just won't
+# get this param unless you add it to DATABASE_URL yourself).
+DB_SSLMODE = os.getenv("DB_SSLMODE", "require")
 
 SECRET_KEY = os.getenv("SECRET_KEY")
 if not SECRET_KEY:
@@ -76,25 +88,27 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login", auto_error=False)
 # DB connection pool
 # ----------------------------------------------------------------------------
 
-pool = pooling.MySQLConnectionPool(pool_name="art_pool", pool_size=5, **DB_CONFIG)
+pool = psycopg2.pool.ThreadedConnectionPool(
+    minconn=1, maxconn=5, dsn=DATABASE_URL, sslmode=DB_SSLMODE
+)
 
 
 def get_db():
-    conn = pool.get_connection()
+    conn = pool.getconn()
     try:
         yield conn
     finally:
-        conn.close()
+        pool.putconn(conn)
 
 
 def init_db():
     """Creates tables if they don't already exist. Run once on startup."""
-    conn = mysql.connector.connect(**DB_CONFIG)
+    conn = psycopg2.connect(DATABASE_URL, sslmode=DB_SSLMODE)
     cur = conn.cursor()
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
-            id INT AUTO_INCREMENT PRIMARY KEY,
+            id SERIAL PRIMARY KEY,
             name VARCHAR(100) NOT NULL,
             email VARCHAR(150) UNIQUE NOT NULL,
             password_hash VARCHAR(255) NOT NULL,
@@ -104,30 +118,28 @@ def init_db():
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS artworks (
-            id INT AUTO_INCREMENT PRIMARY KEY,
+            id SERIAL PRIMARY KEY,
             title VARCHAR(150) NOT NULL,
             description TEXT,
             price DECIMAL(10, 2) NOT NULL,
             category VARCHAR(50) DEFAULT 'other',
             image_path VARCHAR(255) NOT NULL,
-            artist_id INT NOT NULL,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (artist_id) REFERENCES users(id) ON DELETE CASCADE
+            artist_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            stock INT NOT NULL DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS purchases (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            buyer_id INT NOT NULL,
-            artwork_id INT NOT NULL,
+            id SERIAL PRIMARY KEY,
+            buyer_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            artwork_id INT NOT NULL REFERENCES artworks(id) ON DELETE CASCADE,
             amount DECIMAL(10, 2) NOT NULL,
             razorpay_order_id VARCHAR(100) UNIQUE NOT NULL,
             razorpay_payment_id VARCHAR(100),
             status VARCHAR(20) NOT NULL DEFAULT 'pending',
-            purchased_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (buyer_id) REFERENCES users(id) ON DELETE CASCADE,
-            FOREIGN KEY (artwork_id) REFERENCES artworks(id) ON DELETE CASCADE
+            purchased_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
 
@@ -159,6 +171,7 @@ class ArtworkOut(BaseModel):
     category: str
     image_path: str
     artist_id: int
+    stock: int = 1
     artist_name: Optional[str] = None
     created_at: Optional[str] = None
 
@@ -203,7 +216,7 @@ def get_current_user(token: str = Depends(oauth2_scheme), db=Depends(get_db)):
     except JWTError:
         raise credentials_exception
 
-    cur = db.cursor(dictionary=True)
+    cur = db.cursor(cursor_factory=RealDictCursor)
     cur.execute("SELECT id, name, email FROM users WHERE id = %s", (user_id,))
     user = cur.fetchone()
     cur.close()
@@ -241,7 +254,7 @@ def on_startup():
 
 @app.post("/signup", status_code=201)
 def signup(user: UserSignup, db=Depends(get_db)):
-    cur = db.cursor(dictionary=True)
+    cur = db.cursor(cursor_factory=RealDictCursor)
     cur.execute("SELECT id FROM users WHERE email = %s", (user.email,))
     if cur.fetchone():
         cur.close()
@@ -249,11 +262,11 @@ def signup(user: UserSignup, db=Depends(get_db)):
 
     hashed = hash_password(user.password)
     cur.execute(
-        "INSERT INTO users (name, email, password_hash) VALUES (%s, %s, %s)",
+        "INSERT INTO users (name, email, password_hash) VALUES (%s, %s, %s) RETURNING id",
         (user.name, user.email, hashed),
     )
+    new_id = cur.fetchone()["id"]
     db.commit()
-    new_id = cur.lastrowid
     cur.close()
 
     token = create_access_token({"user_id": new_id})
@@ -262,7 +275,7 @@ def signup(user: UserSignup, db=Depends(get_db)):
 
 @app.post("/login")
 def login(credentials: UserLogin, db=Depends(get_db)):
-    cur = db.cursor(dictionary=True)
+    cur = db.cursor(cursor_factory=RealDictCursor)
     cur.execute("SELECT * FROM users WHERE email = %s", (credentials.email,))
     user = cur.fetchone()
     cur.close()
@@ -286,10 +299,10 @@ def read_current_user(current_user=Depends(get_current_user)):
 @app.get("/artworks", response_model=List[ArtworkOut])
 def browse_artworks(category: Optional[str] = None, search: Optional[str] = None, db=Depends(get_db)):
     """Public endpoint — anyone can browse the gallery, with optional filters."""
-    cur = db.cursor(dictionary=True)
+    cur = db.cursor(cursor_factory=RealDictCursor)
     query = """
         SELECT a.id, a.title, a.description, a.price, a.category,
-               a.image_path, a.artist_id, u.name AS artist_name, a.created_at
+               a.image_path, a.artist_id, a.stock, u.name AS artist_name, a.created_at
         FROM artworks a
         JOIN users u ON a.artist_id = u.id
         WHERE 1=1
@@ -299,7 +312,10 @@ def browse_artworks(category: Optional[str] = None, search: Optional[str] = None
         query += " AND a.category = %s"
         params.append(category)
     if search:
-        query += " AND a.title LIKE %s"
+        # ILIKE = Postgres's case-insensitive LIKE (MySQL's LIKE is
+        # case-insensitive by default on most default collations, so this
+        # keeps the same user-facing behaviour).
+        query += " AND a.title ILIKE %s"
         params.append(f"%{search}%")
     query += " ORDER BY a.created_at DESC"
 
@@ -314,10 +330,10 @@ def browse_artworks(category: Optional[str] = None, search: Optional[str] = None
 
 @app.get("/artworks/{artwork_id}", response_model=ArtworkOut)
 def get_artwork(artwork_id: int, db=Depends(get_db)):
-    cur = db.cursor(dictionary=True)
+    cur = db.cursor(cursor_factory=RealDictCursor)
     cur.execute("""
         SELECT a.id, a.title, a.description, a.price, a.category,
-               a.image_path, a.artist_id, u.name AS artist_name, a.created_at
+               a.image_path, a.artist_id, a.stock, u.name AS artist_name, a.created_at
         FROM artworks a
         JOIN users u ON a.artist_id = u.id
         WHERE a.id = %s
@@ -336,6 +352,7 @@ def upload_artwork(
     description: str = Form(""),
     price: float = Form(...),
     category: str = Form("other"),
+    stock: int = Form(1),
     image: UploadFile = File(...),
     current_user=Depends(get_current_user),
     db=Depends(get_db),
@@ -350,21 +367,21 @@ def upload_artwork(
     with open(filepath, "wb") as buffer:
         shutil.copyfileobj(image.file, buffer)
 
-    cur = db.cursor()
+    cur = db.cursor(cursor_factory=RealDictCursor)
     cur.execute(
-        """INSERT INTO artworks (title, description, price, category, image_path, artist_id)
-           VALUES (%s, %s, %s, %s, %s, %s)""",
-        (title, description, price, category, f"/static/uploads/{filename}", current_user["id"]),
+        """INSERT INTO artworks (title, description, price, category, image_path, artist_id, stock)
+           VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id""",
+        (title, description, price, category, f"/static/uploads/{filename}", current_user["id"], stock),
     )
+    new_id = cur.fetchone()["id"]
     db.commit()
-    new_id = cur.lastrowid
     cur.close()
     return {"id": new_id, "message": "Artwork uploaded successfully"}
 
 
 @app.delete("/artworks/{artwork_id}")
 def delete_artwork(artwork_id: int, current_user=Depends(get_current_user), db=Depends(get_db)):
-    cur = db.cursor(dictionary=True)
+    cur = db.cursor(cursor_factory=RealDictCursor)
     cur.execute("SELECT * FROM artworks WHERE id = %s", (artwork_id,))
     art = cur.fetchone()
     if not art:
@@ -397,7 +414,7 @@ def delete_artwork(artwork_id: int, current_user=Depends(get_current_user), db=D
 
 @app.post("/artworks/{artwork_id}/checkout", status_code=201)
 def checkout_artwork(artwork_id: int, current_user=Depends(get_current_user), db=Depends(get_db)):
-    cur = db.cursor(dictionary=True)
+    cur = db.cursor(cursor_factory=RealDictCursor)
     cur.execute("SELECT * FROM artworks WHERE id = %s", (artwork_id,))
     art = cur.fetchone()
     if not art:
@@ -406,6 +423,9 @@ def checkout_artwork(artwork_id: int, current_user=Depends(get_current_user), db
     if art["artist_id"] == current_user["id"]:
         cur.close()
         raise HTTPException(status_code=400, detail="You can't buy your own artwork")
+    if art["stock"] <= 0:
+        cur.close()
+        raise HTTPException(status_code=400, detail="This artwork is sold out")
 
     # Razorpay wants the amount in the smallest currency unit — paise, not rupees.
     amount_paise = int(float(art["price"]) * 100)
@@ -432,7 +452,7 @@ def checkout_artwork(artwork_id: int, current_user=Depends(get_current_user), db
         "order_id": razorpay_order["id"],
         "amount": amount_paise,
         "currency": "INR",
-        "key_id": RAZORPAY_KEY_ID,  # public key — safe to expose to the frontend
+        "key_id": RAZORPAY_KEY_ID,
         "artwork_title": art["title"],
         "buyer_name": current_user["name"],
         "buyer_email": current_user["email"],
@@ -441,10 +461,7 @@ def checkout_artwork(artwork_id: int, current_user=Depends(get_current_user), db
 
 @app.post("/payments/verify")
 def verify_payment(payload: VerifyPayment, current_user=Depends(get_current_user), db=Depends(get_db)):
-    # --- Step 1: recompute the signature ourselves and compare ---
-    # Razorpay's signature = HMAC-SHA256("order_id|payment_id", key_secret)
-    # If this doesn't match, either the data was tampered with, or it's a forged
-    # request that never actually went through Razorpay at all.
+    # --- Step 1: verify the signature ---
     body = f"{payload.razorpay_order_id}|{payload.razorpay_payment_id}"
     expected_signature = hmac.new(
         key=RAZORPAY_KEY_SECRET.encode(),
@@ -453,7 +470,6 @@ def verify_payment(payload: VerifyPayment, current_user=Depends(get_current_user
     ).hexdigest()
 
     if not hmac.compare_digest(expected_signature, payload.razorpay_signature):
-        # Mark this purchase attempt as failed so it doesn't sit as 'pending' forever
         cur = db.cursor()
         cur.execute(
             "UPDATE purchases SET status = 'failed' WHERE razorpay_order_id = %s",
@@ -463,9 +479,8 @@ def verify_payment(payload: VerifyPayment, current_user=Depends(get_current_user
         cur.close()
         raise HTTPException(status_code=400, detail="Payment verification failed — signature mismatch")
 
-    # --- Step 2: signature is genuinely from Razorpay. Confirm this order belongs
-    # to the user making this request (don't let user A confirm user B's order) ---
-    cur = db.cursor(dictionary=True)
+    # --- Step 2: confirm order belongs to this user ---
+    cur = db.cursor(cursor_factory=RealDictCursor)
     cur.execute(
         "SELECT * FROM purchases WHERE razorpay_order_id = %s",
         (payload.razorpay_order_id,),
@@ -478,7 +493,25 @@ def verify_payment(payload: VerifyPayment, current_user=Depends(get_current_user
         cur.close()
         raise HTTPException(status_code=403, detail="This order does not belong to you")
 
-    # --- Step 3: mark as paid ---
+    # --- Step 3: atomically decrement stock — only if stock > 0 ---
+    # UPDATE ... WHERE stock > 0 means the decrement and the check happen in
+    # a single SQL statement, so two simultaneous payments can't both pass a
+    # Python-level stock > 0 check and both decrement past zero. This is the
+    # correct way to handle race conditions on inventory without explicit locks.
+    cur2 = db.cursor()
+    cur2.execute(
+        "UPDATE artworks SET stock = stock - 1 WHERE id = %s AND stock > 0",
+        (purchase["artwork_id"],),
+    )
+    if cur2.rowcount == 0:
+        # rowcount == 0 means the WHERE stock > 0 condition failed —
+        # someone else bought the last copy between checkout and verify.
+        cur2.close()
+        cur.close()
+        db.rollback()
+        raise HTTPException(status_code=400, detail="Sorry, this artwork just sold out")
+
+    # --- Step 4: mark purchase as paid ---
     cur.execute(
         """UPDATE purchases
            SET status = 'paid', razorpay_payment_id = %s
@@ -486,6 +519,7 @@ def verify_payment(payload: VerifyPayment, current_user=Depends(get_current_user
         (payload.razorpay_payment_id, payload.razorpay_order_id),
     )
     db.commit()
+    cur2.close()
     cur.close()
 
     return {"message": "Payment verified successfully", "status": "paid"}
@@ -493,7 +527,7 @@ def verify_payment(payload: VerifyPayment, current_user=Depends(get_current_user
 
 @app.get("/my-purchases")
 def my_purchases(current_user=Depends(get_current_user), db=Depends(get_db)):
-    cur = db.cursor(dictionary=True)
+    cur = db.cursor(cursor_factory=RealDictCursor)
     cur.execute("""
         SELECT a.id, a.title, a.image_path, p.amount AS price, p.purchased_at
         FROM purchases p
@@ -510,7 +544,7 @@ def my_purchases(current_user=Depends(get_current_user), db=Depends(get_db)):
 
 @app.get("/my-artworks")
 def my_artworks(current_user=Depends(get_current_user), db=Depends(get_db)):
-    cur = db.cursor(dictionary=True)
+    cur = db.cursor(cursor_factory=RealDictCursor)
     cur.execute("""
         SELECT id, title, image_path, price, category, created_at
         FROM artworks WHERE artist_id = %s ORDER BY created_at DESC

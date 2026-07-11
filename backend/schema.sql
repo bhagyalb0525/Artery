@@ -1,12 +1,10 @@
--- Run this once in MySQL to create the database.
--- The tables themselves are auto-created by the FastAPI app on startup,
--- but having this file shows the schema clearly (good for explaining in interviews).
-
-CREATE DATABASE IF NOT EXISTS art_marketplace;
-USE art_marketplace;
+-- Run this once against your Postgres database to create the schema.
+-- The tables are also auto-created by the FastAPI app on startup,
+-- but having this file shows the schema clearly (good for explaining
+-- in interviews / vivas).
 
 CREATE TABLE IF NOT EXISTS users (
-    id INT AUTO_INCREMENT PRIMARY KEY,
+    id SERIAL PRIMARY KEY,
     name VARCHAR(100) NOT NULL,
     email VARCHAR(150) UNIQUE NOT NULL,
     password_hash VARCHAR(255) NOT NULL,
@@ -14,26 +12,24 @@ CREATE TABLE IF NOT EXISTS users (
 );
 
 CREATE TABLE IF NOT EXISTS artworks (
-    id INT AUTO_INCREMENT PRIMARY KEY,
+    id SERIAL PRIMARY KEY,
     title VARCHAR(150) NOT NULL,
     description TEXT,
     price DECIMAL(10, 2) NOT NULL,
     category VARCHAR(50) DEFAULT 'other',
     image_path VARCHAR(255) NOT NULL,
-    artist_id INT NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (artist_id) REFERENCES users(id) ON DELETE CASCADE
+    artist_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    stock INT NOT NULL DEFAULT 1,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS purchases (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    buyer_id INT NOT NULL,
-    artwork_id INT NOT NULL,
+    id SERIAL PRIMARY KEY,
+    buyer_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    artwork_id INT NOT NULL REFERENCES artworks(id) ON DELETE CASCADE,
     amount DECIMAL(10, 2) NOT NULL,
     razorpay_order_id VARCHAR(100) UNIQUE NOT NULL,
     razorpay_payment_id VARCHAR(100),
     status VARCHAR(20) NOT NULL DEFAULT 'pending',  -- pending | paid | failed
-    purchased_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (buyer_id) REFERENCES users(id) ON DELETE CASCADE,
-    FOREIGN KEY (artwork_id) REFERENCES artworks(id) ON DELETE CASCADE
+    purchased_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
