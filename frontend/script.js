@@ -7,6 +7,16 @@
 // const API_BASE = "https://your-app-name.onrender.com";
 const API_BASE = "https://artery-oefo.onrender.com";
 
+// Newer artworks store a full Cloudinary URL in image_path (e.g.
+// "https://res.cloudinary.com/..."). Older artworks (uploaded before the
+// Cloudinary switch) still store a local relative path like
+// "/static/uploads/xyz.jpg", which needs API_BASE prepended to resolve.
+// This handles both without breaking either.
+function resolveImageUrl(imagePath) {
+  if (!imagePath) return "";
+  return imagePath.startsWith("http") ? imagePath : `${API_BASE}${imagePath}`;
+}
+
 // ---------- State ----------
 let token = localStorage.getItem("art_token") || null;
 let userName = localStorage.getItem("art_user_name") || null;
@@ -156,7 +166,7 @@ function renderArtGrid(artworks, gridEl, emptyEl, isOwner) {
     card.className = `art-card${soldOut ? " sold-out" : ""}`;
     card.innerHTML = `
       <div class="thumb-wrap">
-        <img src="${API_BASE}${art.image_path}" alt="${escapeHtml(art.title)}" loading="lazy" />
+        <img src="${resolveImageUrl(art.image_path)}" alt="${escapeHtml(art.title)}" loading="lazy" />
         ${soldOut ? `<div class="sold-badge">Sold Out</div>` : ""}
       </div>
       <div class="art-card-body">
@@ -198,7 +208,7 @@ function escapeHtml(str) {
 function openDetail(art) {
   activeArtwork = art;
   const soldOut = art.stock <= 0;
-  els.detailImage.src = `${API_BASE}${art.image_path}`;
+  els.detailImage.src = resolveImageUrl(art.image_path);
   els.detailImage.alt = art.title;
   els.detailTitle.textContent = art.title;
   els.detailArtist.textContent = art.artist_name ? `by ${art.artist_name}` : "";
@@ -493,7 +503,7 @@ async function loadMyPurchases() {
       card.className = "art-card";
       card.innerHTML = `
         <div class="thumb-wrap">
-          <img src="${API_BASE}${p.image_path}" alt="${escapeHtml(p.title)}" loading="lazy" />
+          <img src="${resolveImageUrl(p.image_path)}" alt="${escapeHtml(p.title)}" loading="lazy" />
         </div>
         <div class="art-card-body">
           <h3 class="art-card-title">${escapeHtml(p.title)}</h3>

@@ -8,9 +8,7 @@ venv/
 env/
 .venv/
 
-# Uploaded artwork images (user-generated content shouldn't live in git)
-static/uploads/*
-!static/uploads/.gitkeep
+
 
 # OS / editor junk
 .DS_Store

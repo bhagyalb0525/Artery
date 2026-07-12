@@ -7,3 +7,4 @@ python-multipart==0.0.9
 pydantic[email]==2.7.4
 bcrypt==4.0.1
 razorpay==1.4.2
+cloudinary==1.40.0

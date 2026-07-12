@@ -20,6 +20,8 @@ import psycopg2
 import psycopg2.pool
 from psycopg2.extras import RealDictCursor
 import razorpay
+import cloudinary
+import cloudinary.uploader
 from dotenv import load_dotenv
 from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -33,7 +35,7 @@ from jose import jwt, JWTError
 # Config — loaded from a .env file (see .env.example for the template)
 # ----------------------------------------------------------------------------
 
-load_dotenv(override=True)  # reads variables from a .env file in the same folder into os.environ
+load_dotenv()  # reads variables from a .env file in the same folder into os.environ
 
 # Most free Postgres hosts (Neon, Supabase, Render, Railway) hand you a single
 # connection string instead of separate host/user/password fields. We support
@@ -78,6 +80,20 @@ if not RAZORPAY_KEY_ID or not RAZORPAY_KEY_SECRET:
 
 razorpay_client = razorpay.Client(auth=(RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET))
 
+# --- Cloudinary (persistent image storage) ---
+# Render's local disk is wiped on every restart/redeploy, so newly uploaded
+# images can't live there — Cloudinary's free tier stores them permanently
+# and gives back a stable https URL we save straight into image_path.
+cloudinary.config(
+    cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME"),
+    api_key=os.getenv("CLOUDINARY_API_KEY"),
+    api_secret=os.getenv("CLOUDINARY_API_SECRET"),
+    secure=True,
+)
+
+# Old artworks (uploaded before this change) still store a local relative
+# path like "/static/uploads/xyz.jpg" — those files are baked into the repo
+# and still served here, so this stays around for backward compatibility.
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "..", "static", "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
@@ -362,16 +378,23 @@ def upload_artwork(
     if ext not in (".jpg", ".jpeg", ".png", ".webp", ".gif"):
         raise HTTPException(status_code=400, detail="Unsupported image format")
 
-    filename = f"{uuid.uuid4().hex}{ext}"
-    filepath = os.path.join(UPLOAD_DIR, filename)
-    with open(filepath, "wb") as buffer:
-        shutil.copyfileobj(image.file, buffer)
+    # Upload straight to Cloudinary — this returns a permanent https URL
+    # that survives Render restarts, unlike saving to local disk.
+    try:
+        result = cloudinary.uploader.upload(
+            image.file,
+            folder="artmarket",
+            public_id=uuid.uuid4().hex,
+        )
+        image_url = result["secure_url"]
+    except Exception:
+        raise HTTPException(status_code=502, detail="Image upload failed — please try again")
 
     cur = db.cursor(cursor_factory=RealDictCursor)
     cur.execute(
         """INSERT INTO artworks (title, description, price, category, image_path, artist_id, stock)
            VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id""",
-        (title, description, price, category, f"/static/uploads/{filename}", current_user["id"], stock),
+        (title, description, price, category, image_url, current_user["id"], stock),
     )
     new_id = cur.fetchone()["id"]
     db.commit()
