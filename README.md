@@ -2,7 +2,7 @@
 
 A full-stack web app where artists can upload digital artwork and buyers can browse, search, filter, and purchase pieces.
 
-**Stack:** HTML/CSS/JS (frontend) · FastAPI (backend) · MySQL (database)
+**Stack:** HTML/CSS/JS (frontend) · FastAPI (backend) · PostgreSQL (database)
 
 ---
 
@@ -27,17 +27,6 @@ artmarket/
 
 ---
 
-## 1. Set up MySQL
-
-Make sure MySQL Server is installed and running. Then create the database:
-
-```bash
-mysql -u root -p < backend/schema.sql
-```
-
-(This just creates the `art_marketplace` database and tables. The FastAPI app will also auto-create the tables on startup if they don't exist, so this step is optional but good practice.)
-
----
 
 ## 2. Set up the backend
 
@@ -122,7 +111,7 @@ If you ever accidentally commit `.env` before adding `.gitignore`, deleting the 
 
 Backend and frontend deploy separately.
 
-- **Backend (FastAPI + MySQL)**: platforms like Render, Railway, or PythonAnywhere work well for students and have free tiers. You'll set `DB_HOST`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`, `SECRET_KEY`, and `ALLOWED_ORIGINS` as environment variables in the platform's dashboard — not in a committed `.env`. Most platforms also offer a managed MySQL add-on, or you can use a free MySQL instance from Railway/PlanetScale.
+- **Backend **: platforms like Render, Railway, or PythonAnywhere work well for students and have free tiers. You'll set `DB_HOST`, `DB_USER`, `DB_PASSWORD`, `DB_NAME`, `SECRET_KEY`, and `ALLOWED_ORIGINS` as environment variables in the platform's dashboard — not in a committed `.env`. Most platforms also offer a managed MySQL add-on, or you can use a free MySQL instance from Railway/PlanetScale.
 - **Frontend (static HTML/CSS/JS)**: GitHub Pages, Netlify, or Vercel can serve `frontend/` directly. After deploying, update `API_BASE` at the top of `script.js` to your live backend URL instead of `127.0.0.1:8000`.
 - Update `ALLOWED_ORIGINS` in your backend's environment variables to include your deployed frontend's URL — otherwise the browser blocks the requests with a CORS error.
 
